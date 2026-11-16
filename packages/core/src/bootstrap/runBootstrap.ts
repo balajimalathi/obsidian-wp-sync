@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +16,7 @@ export interface BootstrapOptions {
   vaultRoot: string;
   siteUrl: string;
   client: WpRestClient;
-  /** Absolute path to Python executable (default: python3). */
+  /** Absolute path to Python executable (default: crawler/.venv or python3). */
   pythonPath?: string;
   /** Skip crawl4ai and reuse existing crawl-snapshot.json */
   skipCrawl?: boolean;
@@ -30,6 +31,18 @@ function defaultCrawlerRoot(): string {
   return path.resolve(here, '../../../../crawler');
 }
 
+export function resolvePythonPath(crawlerRoot: string, override?: string): string {
+  if (override) return override;
+  if (process.env.PYTHON) return process.env.PYTHON;
+  const venvPython = path.join(
+    crawlerRoot,
+    '.venv',
+    process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
+  );
+  if (existsSync(venvPython)) return venvPython;
+  return 'python3';
+}
+
 export function runPythonCrawler(options: {
   siteUrl: string;
   outPath: string;
@@ -37,8 +50,8 @@ export function runPythonCrawler(options: {
   crawlerRoot?: string;
   maxPages?: number;
 }): Promise<void> {
-  const python = options.pythonPath ?? process.env.PYTHON ?? 'python3';
   const crawlerRoot = options.crawlerRoot ?? defaultCrawlerRoot();
+  const python = resolvePythonPath(crawlerRoot, options.pythonPath);
   const modulePath = path.join(crawlerRoot, 'src');
 
   return new Promise((resolve, reject) => {
@@ -103,13 +116,30 @@ export async function runBootstrap(options: BootstrapOptions): Promise<SiteInven
     } satisfies CrawlSnapshot;
   }
 
-  const [posts, pages, categories] = await Promise.all([
-    options.client.listPosts(),
-    options.client.listPages(),
-    options.client.listCategories(),
-  ]);
+  let posts: Awaited<ReturnType<WpRestClient['listPosts']>> = [];
+  let pages: Awaited<ReturnType<WpRestClient['listPages']>> = [];
+  let categories: Awaited<ReturnType<WpRestClient['listCategories']>> = [];
+  let wpWarning: string | null = null;
 
-  return reconcileSite({
+  try {
+    [posts, pages, categories] = await Promise.all([
+      options.client.listPosts(),
+      options.client.listPages(),
+      options.client.listCategories(),
+    ]);
+  } catch (err) {
+    wpWarning =
+      err instanceof Error
+        ? err.message
+        : 'WordPress REST API request failed';
+    console.warn(
+      `[wp-sync] WordPress REST unavailable — classifying all crawled URLs as static.\n` +
+        `  ${wpWarning}\n` +
+        `  Tip: set WP_API_URL to your actual WordPress origin if the public site is not WP (e.g. Vercel front + WP backend).`,
+    );
+  }
+
+  const inventory = await reconcileSite({
     vaultRoot: options.vaultRoot,
     siteUrl: options.siteUrl,
     snapshot,
@@ -117,4 +147,9 @@ export async function runBootstrap(options: BootstrapOptions): Promise<SiteInven
     pages,
     categories,
   });
+
+  if (wpWarning) {
+    (inventory as SiteInventory & { wp_warning?: string }).wp_warning = wpWarning;
+  }
+  return inventory;
 }

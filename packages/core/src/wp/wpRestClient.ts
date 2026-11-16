@@ -43,8 +43,8 @@ async function fetchAllPages<T>(
       url,
       method: 'GET',
       headers: {
+        ...DEFAULT_HEADERS,
         Authorization: auth,
-        Accept: 'application/json',
       },
     });
     if (res.status === 400 || res.status === 404) {
@@ -87,12 +87,18 @@ export function createNodeFetchTransport(): HttpTransport {
   };
 }
 
+const DEFAULT_HEADERS = {
+  Accept: 'application/json',
+  'User-Agent':
+    'obsidian-wp-sync/0.1 (+https://github.com/skndan/obsidian-wp-sync; WordPress Application Password client)',
+};
+
 export function createWpRestClient(
   credentials: WpCredentials,
   transport: HttpTransport = createNodeFetchTransport(),
 ): WpRestClient {
   if (!credentials.siteUrl.startsWith('https://') && !credentials.siteUrl.startsWith('http://localhost')) {
-    throw new Error('WP_SITE_URL must use HTTPS (or localhost for development)');
+    throw new Error('WP_SITE_URL / WP_API_URL must use HTTPS (or localhost for development)');
   }
 
   const auth = basicAuthHeader(credentials.username, credentials.applicationPassword);
@@ -127,10 +133,10 @@ export function createWpRestClient(
         url: `${root}/media`,
         method: 'POST',
         headers: {
+          ...DEFAULT_HEADERS,
           Authorization: auth,
           'Content-Disposition': `attachment; filename="${input.filename}"`,
           'Content-Type': input.mimeType,
-          Accept: 'application/json',
         },
         body: input.bytes,
       });
@@ -145,9 +151,9 @@ export function createWpRestClient(
         url,
         method: 'POST',
         headers: {
+          ...DEFAULT_HEADERS,
           Authorization: auth,
           'Content-Type': 'application/json',
-          Accept: 'application/json',
         },
         body: JSON.stringify({
           title: input.title,
@@ -170,9 +176,9 @@ export function createWpRestClient(
         url,
         method: 'POST',
         headers: {
+          ...DEFAULT_HEADERS,
           Authorization: auth,
           'Content-Type': 'application/json',
-          Accept: 'application/json',
         },
         body: JSON.stringify({
           title: input.title,

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { config as loadEnv } from 'dotenv';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   createNodeFetchTransport,
   createWpRestClient,
@@ -14,18 +16,45 @@ import {
   type CrawlSnapshot,
 } from '@obsidian-wp-sync/core';
 
-loadEnv({ path: path.resolve(process.cwd(), '.env') });
+function resolveEnvPath(): string {
+  const candidates = [
+    path.resolve(process.cwd(), '.env'),
+    // packages/cli/src → monorepo root (tsx) or packages/cli/dist → monorepo root (built)
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..', '.env'),
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..', '.env'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return candidates[0]!;
+}
+
+loadEnv({ path: resolveEnvPath() });
 
 function requireEnv(name: string): string {
-  const v = process.env[name];
+  const v = process.env[name]?.trim();
   if (!v) throw new Error(`Missing ${name} (set in .env or environment)`);
   return v;
+}
+
+/** Public consumer site crawled for structure (e.g. https://jsontoimg.com). */
+function publicSiteUrlFromEnv(): string {
+  return (
+    process.env.PUBLIC_SITE_URL?.trim() ||
+    process.env.WP_SITE_URL?.trim() ||
+    requireEnv('PUBLIC_SITE_URL')
+  );
+}
+
+/** WordPress multisite origin that serves REST (e.g. https://blog.skndan.com/jsontoimg). */
+function apiUrlFromEnv(): string {
+  return process.env.WP_API_URL?.trim() || requireEnv('WP_API_URL');
 }
 
 function clientFromEnv() {
   return createWpRestClient(
     {
-      siteUrl: requireEnv('WP_SITE_URL'),
+      siteUrl: apiUrlFromEnv(),
       username: requireEnv('WP_USERNAME'),
       applicationPassword: requireEnv('WP_APPLICATION_PASSWORD'),
     },
@@ -47,9 +76,13 @@ program
   .option('--max-pages <n>', 'crawl4ai page cap', '500')
   .action(async (opts: { vault?: string; skipCrawl?: boolean; maxPages?: string }) => {
     const vault = vaultPath(opts.vault);
+    const publicSiteUrl = publicSiteUrlFromEnv();
+    const apiUrl = apiUrlFromEnv();
+    console.log(`Crawl site: ${publicSiteUrl}`);
+    console.log(`WP API:     ${apiUrl}`);
     const inventory = await runBootstrap({
       vaultRoot: vault,
-      siteUrl: requireEnv('WP_SITE_URL'),
+      siteUrl: publicSiteUrl,
       client: clientFromEnv(),
       skipCrawl: Boolean(opts.skipCrawl),
       maxPages: Number(opts.maxPages ?? 500),
@@ -64,10 +97,11 @@ program
   .option('--vault <path>', 'Obsidian vault root')
   .action(async (opts: { vault?: string }) => {
     const vault = vaultPath(opts.vault);
+    const publicSiteUrl = publicSiteUrlFromEnv();
     const snapshot =
       (await loadCrawlSnapshot(vault)) ??
       ({
-        site_url: requireEnv('WP_SITE_URL'),
+        site_url: publicSiteUrl,
         crawled_at: new Date().toISOString(),
         page_count: 0,
         pages: [],
@@ -80,7 +114,7 @@ program
     ]);
     const inventory = await reconcileSite({
       vaultRoot: vault,
-      siteUrl: requireEnv('WP_SITE_URL'),
+      siteUrl: publicSiteUrl,
       snapshot,
       posts,
       pages,

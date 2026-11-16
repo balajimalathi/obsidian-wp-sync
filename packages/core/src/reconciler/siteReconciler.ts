@@ -71,16 +71,11 @@ export interface ReconcileInput {
   categories: WpTerm[];
 }
 
-function normalizeUrlPath(url: string, siteUrl: string): string {
+function normalizeUrlPath(url: string, _siteUrl?: string): string {
   try {
-    const u = new URL(url);
-    const site = new URL(siteUrl);
-    if (u.origin !== site.origin) {
-      return u.pathname.replace(/\/+$/, '') || '/';
-    }
-    return u.pathname.replace(/\/+$/, '') || '/';
+    return new URL(url).pathname.replace(/\/+$/, '') || '/';
   } catch {
-    return url;
+    return url.replace(/\/+$/, '') || '/';
   }
 }
 
@@ -89,6 +84,49 @@ function slugFromPath(urlPath: string): string {
   if (!trimmed) return 'home';
   const parts = trimmed.split('/');
   return parts[parts.length - 1] || 'home';
+}
+
+/** Index crawl paths by final segment for headless public-site matching. */
+export function buildCrawlPathIndex(paths: string[]): Map<string, string[]> {
+  const bySlug = new Map<string, string[]>();
+  for (const p of paths) {
+    const slug = slugFromPath(p);
+    const list = bySlug.get(slug) ?? [];
+    list.push(p);
+    bySlug.set(slug, list);
+  }
+  return bySlug;
+}
+
+/**
+ * Map a WP slug onto the public consumer site path.
+ * Posts prefer /blog/<slug>; pages also try /alternatives/<base> for *-alternative slugs.
+ */
+export function resolvePublicPathForSlug(
+  slug: string,
+  kind: 'post' | 'page',
+  crawlBySlug: Map<string, string[]>,
+): string {
+  const candidates = crawlBySlug.get(slug) ?? [];
+  if (kind === 'post') {
+    const blog = candidates.find((p) => p === `/blog/${slug}` || p.startsWith('/blog/'));
+    if (blog) return blog;
+    if (candidates[0]) return candidates[0];
+    return `/blog/${slug}`;
+  }
+
+  if (candidates[0]) return candidates[0];
+
+  if (slug.endsWith('-alternative')) {
+    const base = slug.replace(/-alternative$/, '');
+    const altHits = crawlBySlug.get(base) ?? [];
+    const underAlts = altHits.find((p) => p.startsWith('/alternatives/'));
+    if (underAlts) return underAlts;
+    if (altHits[0]) return altHits[0];
+    return `/alternatives/${base}`;
+  }
+
+  return `/${slug}`;
 }
 
 function categoryById(categories: WpTerm[]): Map<number, WpTerm> {
@@ -203,9 +241,14 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
   await migrateLegacyStaticRoutes(vaultRoot);
 
   const catById = categoryById(categories);
-  const wpUrlPaths = new Set<string>();
+  const claimedPublicPaths = new Set<string>();
   const wordpressItems: InventoryItem[] = [];
   const staticItems: InventoryItem[] = [];
+
+  const crawlPaths = snapshot.pages
+    .filter((p) => p.status === 'ok')
+    .map((p) => normalizeUrlPath(p.url, siteUrl));
+  const crawlBySlug = buildCrawlPathIndex(crawlPaths);
 
   // Pillars = first post per category used as index when only one "main" post;
   // For bootstrap: each category folder gets posts; the first publish post becomes pillar index if named like category, else first post is pillar.
@@ -225,8 +268,8 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
     const clusterPosts = sorted.filter((p) => p.id !== pillarPost.id);
 
     const pillarPath = pillarIndexPath(catSlug);
-    const pillarUrl = normalizeUrlPath(pillarPost.link, siteUrl);
-    wpUrlPaths.add(pillarUrl);
+    const pillarUrl = resolvePublicPathForSlug(pillarPost.slug, 'post', crawlBySlug);
+    claimedPublicPaths.add(pillarUrl);
 
     const pillarFm = createDefaultFrontmatter({
       title: titleOf(pillarPost),
@@ -260,8 +303,8 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
 
     for (const post of clusterPosts) {
       const notePath = clusterNotePath(catSlug, post.slug);
-      const urlPath = normalizeUrlPath(post.link, siteUrl);
-      wpUrlPaths.add(urlPath);
+      const urlPath = resolvePublicPathForSlug(post.slug, 'post', crawlBySlug);
+      claimedPublicPaths.add(urlPath);
       const fm = createDefaultFrontmatter({
         title: titleOf(post),
         source: 'wordpress',
@@ -292,8 +335,8 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
   }
 
   for (const page of pages) {
-    const urlPath = normalizeUrlPath(page.link, siteUrl);
-    wpUrlPaths.add(urlPath);
+    const urlPath = resolvePublicPathForSlug(page.slug, 'page', crawlBySlug);
+    claimedPublicPaths.add(urlPath);
     const notePath = pageNotePath(page.slug);
     const fm = createDefaultFrontmatter({
       title: titleOf(page),
@@ -327,7 +370,7 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
   for (const page of snapshot.pages) {
     if (page.status !== 'ok') continue;
     const urlPath = normalizeUrlPath(page.url, siteUrl);
-    if (wpUrlPaths.has(urlPath)) continue;
+    if (claimedPublicPaths.has(urlPath)) continue;
     // Skip obvious non-content paths
     if (
       urlPath.includes('/wp-json') ||
