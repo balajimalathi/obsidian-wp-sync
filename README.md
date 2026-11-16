@@ -14,7 +14,30 @@ Phase 1: Shared vault schema, `crawl4ai` site bootstrapper, and CLI for bidirect
 
 ```bash
 npm install
-cd crawler && pip install -e ".[dev]" && crawl4ai-setup
-cp .env.example .env   # set WP credentials + site URL
-npx wp-sync bootstrap --vault /path/to/vault
+npm test
+npm run build
+
+# Python crawler (Python 3.10+ recommended for crawl4ai)
+cd crawler
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip setuptools wheel
+pip install -e ".[dev]"
+crawl4ai-setup   # installs browser deps for crawl4ai
+cd ..
+
+cp .env.example .env   # set WP_SITE_URL, WP_USERNAME, WP_APPLICATION_PASSWORD, VAULT_PATH
+npm run wp-sync -- bootstrap --vault /Users/equitasrmb/Documents/skndan/obsidian
 ```
+
+## CLI commands
+
+| Command | Purpose |
+| --- | --- |
+| `wp-sync bootstrap` | Crawl site + pull WP REST → vault layout + inventory |
+| `wp-sync inventory` | Rebuild wordpress vs static inventory |
+| `wp-sync validate` | Featured image / placeholder / link checks |
+| `wp-sync pull` | Pull WP content; archive local notes for WP-deleted IDs |
+| `wp-sync push` | Validate + upload unique media + upsert posts/pages (never deletes WP) |
+
+All mutating commands accept `--dry-run`. Deleting a note in Obsidian never deletes WordPress content.
