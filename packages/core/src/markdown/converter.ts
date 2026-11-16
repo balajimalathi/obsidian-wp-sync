@@ -1,11 +1,15 @@
 import { marked } from 'marked';
 import TurndownService from 'turndown';
+// turndown-plugin-gfm ships CJS; named `tables` / `gfm` exports convert HTML tables to GFM pipes.
+import { tables as turndownTables } from 'turndown-plugin-gfm';
 
 const turndown = new TurndownService({
   headingStyle: 'atx',
   codeBlockStyle: 'fenced',
   bulletListMarker: '-',
 });
+
+turndown.use(turndownTables);
 
 turndown.addRule('wordpressImage', {
   filter: 'img',
