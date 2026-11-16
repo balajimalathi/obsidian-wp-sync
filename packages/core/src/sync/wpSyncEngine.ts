@@ -25,10 +25,7 @@ import {
   serializeVaultNote,
   type VaultNoteFrontmatter,
 } from '../schema/frontmatter.js';
-import {
-  assertPushable,
-  validateVault,
-} from '../validator/vaultValidator.js';
+import { assertPushable, validateVault } from '../validator/vaultValidator.js';
 import type { WpRestClient } from '../wp/wpRestClient.js';
 import type { WpMediaItem, WpPage, WpPost, WpTerm } from '../wp/types.js';
 import {
@@ -43,14 +40,18 @@ import {
   writeText,
 } from '../vault/fs.js';
 import {
-  ARCHIVE_DELETED_ON_WP_DIR,
   clusterNotePath,
+  isUnderSite,
   pageNotePath,
   pillarIndexPath,
+  siteArchiveDir,
+  siteAssetsImagesDir,
+  stripSiteRoot,
 } from '../vault/paths.js';
 
 export interface SyncEngineOptions {
   vaultRoot: string;
+  siteId: string;
   client: WpRestClient;
   dryRun?: boolean;
   allowDraftLinks?: boolean;
@@ -84,8 +85,6 @@ function mimeFromExt(ext: string): string {
       return 'image/webp';
     case '.svg':
       return 'image/svg+xml';
-    case '.avif':
-      return 'image/avif';
     default:
       return 'application/octet-stream';
   }
@@ -93,13 +92,13 @@ function mimeFromExt(ext: string): string {
 
 async function loadManagedNotes(
   vaultRoot: string,
+  siteId: string,
 ): Promise<Array<{ path: string; frontmatter: VaultNoteFrontmatter; body: string }>> {
   const files = await listFilesRecursive(vaultRoot, (rel) => {
     const n = rel.replace(/\\/g, '/');
     if (!n.endsWith('.md')) return false;
-    if (n.startsWith('.wp-sync/') || n.startsWith('.obsidian/') || n.startsWith('_archive/')) {
-      return false;
-    }
+    if (!isUnderSite(siteId, n)) return false;
+    if (n.includes('/.wp-sync/') || n.includes('/_archive/')) return false;
     return true;
   });
   const notes = [];
@@ -136,7 +135,6 @@ function normalizeUrlPath(url: string): string {
 async function downloadAndHashMedia(
   item: WpMediaItem,
 ): Promise<{ sha256: string; bytes: Uint8Array } | null> {
-  // Prefer hashing via fetching source_url through a simple fetch when available
   try {
     const res = await fetch(item.source_url);
     if (!res.ok) return null;
@@ -149,7 +147,7 @@ async function downloadAndHashMedia(
 }
 
 export async function pullFromWordPress(options: SyncEngineOptions): Promise<SyncResult> {
-  const { vaultRoot, client, dryRun = false } = options;
+  const { vaultRoot, siteId, client, dryRun = false } = options;
   const result: SyncResult = {
     pulled: [],
     pushed: [],
@@ -167,18 +165,17 @@ export async function pullFromWordPress(options: SyncEngineOptions): Promise<Syn
   ]);
 
   const catById = new Map(categories.map((c) => [c.id, c]));
-  const localNotes = await loadManagedNotes(vaultRoot);
+  const localNotes = await loadManagedNotes(vaultRoot, siteId);
 
-  let registry = await loadMediaRegistry(vaultRoot);
+  let registry = await loadMediaRegistry(vaultRoot, siteId);
 
-  // Index remote media hashes when we can download them (best-effort; skip in dryRun network heavy ops still ok)
   for (const m of media) {
     const hashed = await downloadAndHashMedia(m);
     if (!hashed) continue;
     if (!registry.entries[hashed.sha256]) {
       const category = 'imported';
       const filename = path.basename(new URL(m.source_url).pathname) || `media-${m.id}`;
-      const vaultPath = `assets/images/${category}/${filename}`;
+      const vaultPath = `${siteAssetsImagesDir(siteId)}/${category}/${filename}`;
       if (!dryRun) {
         const abs = joinVault(vaultRoot, vaultPath);
         if (!(await pathExists(abs))) {
@@ -189,7 +186,7 @@ export async function pullFromWordPress(options: SyncEngineOptions): Promise<Syn
       }
       registry = registerWpMediaByHash(registry, {
         sha256: hashed.sha256,
-        vaultPath: `assets/images/${category}/${filename}`,
+        vaultPath,
         category,
         wpMediaId: m.id,
         wpSourceUrl: m.source_url,
@@ -200,7 +197,7 @@ export async function pullFromWordPress(options: SyncEngineOptions): Promise<Syn
     }
   }
   if (!dryRun) {
-    await saveMediaRegistry(vaultRoot, registry);
+    await saveMediaRegistry(vaultRoot, siteId, registry);
   }
 
   const remoteIds = new Set<number>();
@@ -253,15 +250,15 @@ export async function pullFromWordPress(options: SyncEngineOptions): Promise<Syn
       result.pulled.push(notePath);
     };
 
-    await writePost(pillarPost, 'pillar', pillarIndexPath(catSlug));
+    await writePost(pillarPost, 'pillar', pillarIndexPath(siteId, catSlug));
     for (const post of clusters) {
-      await writePost(post, 'cluster', clusterNotePath(catSlug, post.slug));
+      await writePost(post, 'cluster', clusterNotePath(siteId, catSlug, post.slug));
     }
   }
 
   for (const page of pages) {
     remoteIds.add(page.id);
-    const notePath = pageNotePath(page.slug);
+    const notePath = pageNotePath(siteId, page.slug);
     const featuredPath = page.featured_media
       ? Object.values(registry.entries).find((e) => e.wpMediaId === page.featured_media)
           ?.vaultPath ?? null
@@ -289,11 +286,11 @@ export async function pullFromWordPress(options: SyncEngineOptions): Promise<Syn
     result.pulled.push(notePath);
   }
 
-  // Archive local notes whose wp_id no longer exists remotely
   for (const note of localNotes) {
     if (note.frontmatter.source !== 'wordpress' || note.frontmatter.wp_id == null) continue;
     if (remoteIds.has(note.frontmatter.wp_id)) continue;
-    const dest = `${ARCHIVE_DELETED_ON_WP_DIR}/${note.path}`;
+    const withinSite = stripSiteRoot(siteId, note.path);
+    const dest = `${siteArchiveDir(siteId)}/${withinSite}`;
     if (!dryRun) {
       await moveFile(joinVault(vaultRoot, note.path), joinVault(vaultRoot, dest));
     }
@@ -305,6 +302,7 @@ export async function pullFromWordPress(options: SyncEngineOptions): Promise<Syn
 
 async function ensureMediaUploaded(
   vaultRoot: string,
+  siteId: string,
   vaultPath: string,
   slug: string,
   client: WpRestClient,
@@ -343,13 +341,13 @@ async function ensureMediaUploaded(
     wpMediaId: media.id,
     wpSourceUrl: media.source_url,
   });
-  await saveMediaRegistry(vaultRoot, registry);
+  await saveMediaRegistry(vaultRoot, siteId, registry);
   uploaded.push(vaultPath);
   return { mediaId: media.id, sourceUrl: media.source_url, registry };
 }
 
 export async function pushToWordPress(options: SyncEngineOptions): Promise<SyncResult> {
-  const { vaultRoot, client, dryRun = false, allowDraftLinks = false } = options;
+  const { vaultRoot, siteId, client, dryRun = false, allowDraftLinks = false } = options;
   const result: SyncResult = {
     pulled: [],
     pushed: [],
@@ -359,9 +357,8 @@ export async function pushToWordPress(options: SyncEngineOptions): Promise<SyncR
     dryRun,
   };
 
-  const issues = await validateVault(vaultRoot, { allowDraftLinks });
-  // Only push wordpress notes — filter static errors for notes we won't push
-  const wordpressNotes = (await loadManagedNotes(vaultRoot)).filter(
+  const issues = await validateVault(vaultRoot, siteId, { allowDraftLinks });
+  const wordpressNotes = (await loadManagedNotes(vaultRoot, siteId)).filter(
     (n) => n.frontmatter.source === 'wordpress',
   );
   const relevantIssues = issues.filter(
@@ -371,7 +368,7 @@ export async function pushToWordPress(options: SyncEngineOptions): Promise<SyncR
   );
   assertPushable(relevantIssues);
 
-  let registry = await loadMediaRegistry(vaultRoot);
+  let registry = await loadMediaRegistry(vaultRoot, siteId);
   const categories = await client.listCategories();
   const catIdBySlug = new Map(categories.map((c) => [c.slug, c.id]));
 
@@ -383,7 +380,6 @@ export async function pushToWordPress(options: SyncEngineOptions): Promise<SyncR
     let body = note.body;
     let registryMut = registry;
 
-    // Upload featured + inline images
     const imagePaths = new Set(extractImagePaths(body));
     if (fm.featured_image) imagePaths.add(fm.featured_image);
 
@@ -394,6 +390,7 @@ export async function pushToWordPress(options: SyncEngineOptions): Promise<SyncR
       const normalized = imgPath.replace(/^\.\//, '');
       const { mediaId, sourceUrl, registry: next } = await ensureMediaUploaded(
         vaultRoot,
+        siteId,
         normalized,
         fm.slug,
         client,
@@ -462,7 +459,7 @@ export async function pushToWordPress(options: SyncEngineOptions): Promise<SyncR
   }
 
   if (!dryRun) {
-    await saveMediaRegistry(vaultRoot, registry);
+    await saveMediaRegistry(vaultRoot, siteId, registry);
   }
 
   return result;

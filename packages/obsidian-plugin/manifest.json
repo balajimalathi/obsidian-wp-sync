@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-wp-sync",
+  "name": "WP Sync",
+  "version": "0.2.0",
+  "minAppVersion": "1.5.0",
+  "description": "Multi-site Obsidian ↔ WordPress sync (bootstrap, pull, push, validate).",
+  "author": "skndan",
+  "authorUrl": "https://skndan.com",
+  "isDesktopOnly": true
+}

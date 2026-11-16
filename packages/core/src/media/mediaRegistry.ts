@@ -1,7 +1,10 @@
 import path from 'node:path';
 import {
   ASSETS_IMAGES_DIR,
-  MEDIA_REGISTRY_FILE,
+  isUnderSite,
+  siteAssetsImagesDir,
+  siteMediaRegistryFile,
+  stripSiteRoot,
 } from '../vault/paths.js';
 import {
   joinVault,
@@ -37,8 +40,11 @@ export function emptyMediaRegistry(): MediaRegistry {
   return { version: 1, entries: {} };
 }
 
-export async function loadMediaRegistry(vaultRoot: string): Promise<MediaRegistry> {
-  const file = joinVault(vaultRoot, MEDIA_REGISTRY_FILE);
+export async function loadMediaRegistry(
+  vaultRoot: string,
+  siteId: string,
+): Promise<MediaRegistry> {
+  const file = joinVault(vaultRoot, siteMediaRegistryFile(siteId));
   if (!(await pathExists(file))) {
     return emptyMediaRegistry();
   }
@@ -52,21 +58,25 @@ export async function loadMediaRegistry(vaultRoot: string): Promise<MediaRegistr
 
 export async function saveMediaRegistry(
   vaultRoot: string,
+  siteId: string,
   registry: MediaRegistry,
 ): Promise<void> {
-  const file = joinVault(vaultRoot, MEDIA_REGISTRY_FILE);
+  const file = joinVault(vaultRoot, siteMediaRegistryFile(siteId));
   await writeText(file, JSON.stringify(registry, null, 2) + '\n');
 }
 
 export function categoryFromVaultPath(vaultPath: string): string {
   const normalized = vaultPath.replace(/\\/g, '/');
-  const prefix = `${ASSETS_IMAGES_DIR}/`;
-  if (!normalized.startsWith(prefix)) {
+  const marker = `/${ASSETS_IMAGES_DIR}/`;
+  const idx = normalized.indexOf(marker);
+  if (idx === -1) {
+    if (normalized.startsWith(`${ASSETS_IMAGES_DIR}/`)) {
+      return normalized.slice(`${ASSETS_IMAGES_DIR}/`.length).split('/')[0] || 'uncategorized';
+    }
     return 'uncategorized';
   }
-  const rest = normalized.slice(prefix.length);
-  const category = rest.split('/')[0];
-  return category || 'uncategorized';
+  const rest = normalized.slice(idx + marker.length);
+  return rest.split('/')[0] || 'uncategorized';
 }
 
 export function buildUploadFilename(
@@ -82,13 +92,17 @@ export function buildUploadFilename(
   return `${safeCategory}--${safeSlug}-${hash8}${normalizedExt}`;
 }
 
-export async function scanVaultImages(vaultRoot: string): Promise<Map<string, string[]>> {
-  const imagesRoot = joinVault(vaultRoot, ASSETS_IMAGES_DIR);
+export async function scanVaultImages(
+  vaultRoot: string,
+  siteId: string,
+): Promise<Map<string, string[]>> {
+  const imagesRel = siteAssetsImagesDir(siteId);
+  const imagesRoot = joinVault(vaultRoot, imagesRel);
   const files = await listFilesRecursive(imagesRoot, (rel) => IMAGE_EXT.test(rel));
   const byHash = new Map<string, string[]>();
 
   for (const rel of files) {
-    const vaultPath = `${ASSETS_IMAGES_DIR}/${rel}`.replace(/\\/g, '/');
+    const vaultPath = `${imagesRel}/${rel}`.replace(/\\/g, '/');
     const abs = joinVault(vaultRoot, vaultPath);
     const hash = await sha256File(abs);
     const existing = byHash.get(hash) ?? [];
@@ -101,8 +115,9 @@ export async function scanVaultImages(vaultRoot: string): Promise<Map<string, st
 
 export async function findDuplicateImageGroups(
   vaultRoot: string,
+  siteId: string,
 ): Promise<DuplicateGroup[]> {
-  const byHash = await scanVaultImages(vaultRoot);
+  const byHash = await scanVaultImages(vaultRoot, siteId);
   const groups: DuplicateGroup[] = [];
   for (const [sha256, paths] of byHash) {
     if (paths.length > 1) {
@@ -119,10 +134,14 @@ export async function findDuplicateImageGroups(
 
 export async function upsertLocalImage(
   vaultRoot: string,
+  siteId: string,
   vaultPath: string,
   registry?: MediaRegistry,
 ): Promise<{ registry: MediaRegistry; entry: MediaRegistryEntry; isDuplicate: boolean }> {
-  const reg = registry ?? (await loadMediaRegistry(vaultRoot));
+  if (!isUnderSite(siteId, vaultPath)) {
+    throw new Error(`Image path must be under ${siteAssetsImagesDir(siteId)}: ${vaultPath}`);
+  }
+  const reg = registry ?? (await loadMediaRegistry(vaultRoot, siteId));
   const abs = joinVault(vaultRoot, vaultPath);
   const sha256 = await sha256File(abs);
   const existing = reg.entries[sha256];
@@ -141,7 +160,7 @@ export async function upsertLocalImage(
     wpSourceUrl: null,
   };
   reg.entries[sha256] = entry;
-  await saveMediaRegistry(vaultRoot, reg);
+  await saveMediaRegistry(vaultRoot, siteId, reg);
   return { registry: reg, entry, isDuplicate: false };
 }
 
@@ -182,3 +201,5 @@ export function findBySha256(
 export function extFromPath(filePath: string): string {
   return path.extname(filePath) || '.bin';
 }
+
+export { stripSiteRoot };

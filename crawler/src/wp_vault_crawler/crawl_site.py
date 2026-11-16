@@ -63,7 +63,10 @@ async def fetch_sitemap_urls(site_url: str) -> list[str]:
 
 async def crawl_site(site_url: str, max_pages: int = 500) -> dict:
     from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
-    from crawl4ai.content_filter_strategy import PruningContentFilter
+    try:
+        from crawl4ai.content_filter_strategy import PruningContentFilterLXML as PruningFilter
+    except ImportError:
+        from crawl4ai.content_filter_strategy import PruningContentFilter as PruningFilter
     from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
     seed_urls = await fetch_sitemap_urls(site_url)
@@ -71,7 +74,7 @@ async def crawl_site(site_url: str, max_pages: int = 500) -> dict:
         seed_urls = [normalize_url(site_url)]
 
     md_generator = DefaultMarkdownGenerator(
-        content_filter=PruningContentFilter(threshold=0.48, threshold_type="fixed")
+        content_filter=PruningFilter(threshold=0.48, threshold_type="fixed")
     )
     config = CrawlerRunConfig(
         markdown_generator=md_generator,

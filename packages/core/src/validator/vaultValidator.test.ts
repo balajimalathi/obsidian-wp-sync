@@ -3,7 +3,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { serializeVaultNote, createDefaultFrontmatter } from '../schema/frontmatter.js';
+import {
+  pageNotePath,
+  pillarIndexPath,
+  siteAssetsImagesDir,
+  siteAssetsPlaceholdersDir,
+  siteStaticDir,
+  clusterNotePath,
+} from '../vault/paths.js';
 import { validateVault } from './vaultValidator.js';
+
+const SITE = 'jsontoimg';
 
 async function tempVault(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), 'wp-sync-val-'));
@@ -12,8 +22,10 @@ async function tempVault(): Promise<string> {
 describe('vaultValidator', () => {
   it('blocks static notes and missing featured images', async () => {
     const vault = await tempVault();
-    await mkdir(path.join(vault, 'static/about'), { recursive: true });
-    await mkdir(path.join(vault, 'pages'), { recursive: true });
+    await mkdir(path.join(vault, siteStaticDir(SITE), 'about'), { recursive: true });
+    await mkdir(path.dirname(path.join(vault, pageNotePath(SITE, 'contact'))), {
+      recursive: true,
+    });
 
     const staticNote = serializeVaultNote(
       createDefaultFrontmatter({
@@ -26,7 +38,7 @@ describe('vaultValidator', () => {
       }),
       'Static body\n',
     );
-    await writeFile(path.join(vault, 'static/about/index.md'), staticNote);
+    await writeFile(path.join(vault, siteStaticDir(SITE), 'about/index.md'), staticNote);
 
     const page = serializeVaultNote(
       createDefaultFrontmatter({
@@ -40,18 +52,21 @@ describe('vaultValidator', () => {
       }),
       'Contact body\n',
     );
-    await writeFile(path.join(vault, 'pages/contact.md'), page);
+    await writeFile(path.join(vault, pageNotePath(SITE, 'contact')), page);
 
-    const issues = await validateVault(vault);
+    const issues = await validateVault(vault, SITE);
     expect(issues.some((i) => i.code === 'static_source')).toBe(true);
     expect(issues.some((i) => i.code === 'missing_featured_image')).toBe(true);
   });
 
   it('blocks placeholder images', async () => {
     const vault = await tempVault();
-    await mkdir(path.join(vault, 'pages'), { recursive: true });
-    await mkdir(path.join(vault, 'assets/placeholders'), { recursive: true });
-    await writeFile(path.join(vault, 'assets/placeholders/hero.png'), Buffer.from('x'));
+    const featured = `${siteAssetsPlaceholdersDir(SITE)}/hero.png`;
+    await mkdir(path.dirname(path.join(vault, pageNotePath(SITE, 'contact'))), {
+      recursive: true,
+    });
+    await mkdir(path.dirname(path.join(vault, featured)), { recursive: true });
+    await writeFile(path.join(vault, featured), Buffer.from('x'));
 
     const page = serializeVaultNote(
       createDefaultFrontmatter({
@@ -62,21 +77,23 @@ describe('vaultValidator', () => {
         url_path: '/contact',
         wp_type: 'page',
         status: 'publish',
-        featured_image: 'assets/placeholders/hero.png',
+        featured_image: featured,
       }),
       'Body\n',
     );
-    await writeFile(path.join(vault, 'pages/contact.md'), page);
+    await writeFile(path.join(vault, pageNotePath(SITE, 'contact')), page);
 
-    const issues = await validateVault(vault);
+    const issues = await validateVault(vault, SITE);
     expect(issues.some((i) => i.code === 'placeholder_featured_image')).toBe(true);
   });
 
   it('requires pillar index for cluster posts', async () => {
     const vault = await tempVault();
-    await mkdir(path.join(vault, 'pillars/seo'), { recursive: true });
-    await mkdir(path.join(vault, 'assets/images/seo'), { recursive: true });
-    await writeFile(path.join(vault, 'assets/images/seo/hero.png'), Buffer.from('x'));
+    const featured = `${siteAssetsImagesDir(SITE)}/seo/hero.png`;
+    const clusterPath = clusterNotePath(SITE, 'seo', 'cluster');
+    await mkdir(path.dirname(path.join(vault, clusterPath)), { recursive: true });
+    await mkdir(path.dirname(path.join(vault, featured)), { recursive: true });
+    await writeFile(path.join(vault, featured), Buffer.from('x'));
 
     const cluster = serializeVaultNote(
       createDefaultFrontmatter({
@@ -88,13 +105,14 @@ describe('vaultValidator', () => {
         wp_type: 'post',
         status: 'draft',
         pillar: 'seo',
-        featured_image: 'assets/images/seo/hero.png',
+        featured_image: featured,
       }),
       'Body\n',
     );
-    await writeFile(path.join(vault, 'pillars/seo/cluster.md'), cluster);
+    await writeFile(path.join(vault, clusterPath), cluster);
 
-    const issues = await validateVault(vault);
+    const issues = await validateVault(vault, SITE);
     expect(issues.some((i) => i.code === 'missing_pillar_index')).toBe(true);
+    expect(issues.some((i) => i.message.includes(pillarIndexPath(SITE, 'seo')))).toBe(true);
   });
 });

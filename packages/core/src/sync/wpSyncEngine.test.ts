@@ -6,7 +6,16 @@ import { createDefaultFrontmatter, serializeVaultNote } from '../schema/frontmat
 import type { WpRestClient } from '../wp/wpRestClient.js';
 import type { WpMediaItem, WpPage, WpPost, WpTerm } from '../wp/types.js';
 import { pathExists } from '../vault/fs.js';
+import {
+  clusterNotePath,
+  pageNotePath,
+  pillarIndexPath,
+  siteArchiveDir,
+  siteAssetsImagesDir,
+} from '../vault/paths.js';
 import { pullFromWordPress, pushToWordPress } from './wpSyncEngine.js';
+
+const SITE = 'jsontoimg';
 
 async function tempVault(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), 'wp-sync-engine-'));
@@ -73,9 +82,11 @@ function mockClient(overrides: Partial<WpRestClient> = {}): WpRestClient {
 describe('wpSyncEngine', () => {
   it('pulls posts into pillars and archives missing remote ids', async () => {
     const vault = await tempVault();
-    await mkdir(path.join(vault, 'pillars/seo'), { recursive: true });
-    await mkdir(path.join(vault, 'assets/images/seo'), { recursive: true });
-    await writeFile(path.join(vault, 'assets/images/seo/hero.png'), Buffer.from('img'));
+    const featured = `${siteAssetsImagesDir(SITE)}/seo/hero.png`;
+    const orphanPath = clusterNotePath(SITE, 'seo', 'gone');
+    await mkdir(path.dirname(path.join(vault, orphanPath)), { recursive: true });
+    await mkdir(path.dirname(path.join(vault, featured)), { recursive: true });
+    await writeFile(path.join(vault, featured), Buffer.from('img'));
 
     const orphan = serializeVaultNote(
       createDefaultFrontmatter({
@@ -88,13 +99,12 @@ describe('wpSyncEngine', () => {
         wp_type: 'post',
         status: 'publish',
         pillar: 'seo',
-        featured_image: 'assets/images/seo/hero.png',
+        featured_image: featured,
       }),
       'orphan\n',
     );
-    await writeFile(path.join(vault, 'pillars/seo/gone.md'), orphan);
+    await writeFile(path.join(vault, orphanPath), orphan);
 
-    // Also need pillar index for orphan's pillar before pull overwrites
     const pillar = serializeVaultNote(
       createDefaultFrontmatter({
         title: 'Old Pillar',
@@ -106,28 +116,30 @@ describe('wpSyncEngine', () => {
         wp_type: 'post',
         status: 'publish',
         pillar: 'seo',
-        featured_image: 'assets/images/seo/hero.png',
+        featured_image: featured,
       }),
       'old\n',
     );
-    await writeFile(path.join(vault, 'pillars/seo/index.md'), pillar);
+    await writeFile(path.join(vault, pillarIndexPath(SITE, 'seo')), pillar);
 
     const result = await pullFromWordPress({
       vaultRoot: vault,
+      siteId: SITE,
       client: mockClient(),
       dryRun: false,
     });
 
-    expect(result.archived).toContain('pillars/seo/gone.md');
-    expect(await pathExists(path.join(vault, '_archive/deleted-on-wp/pillars/seo/gone.md'))).toBe(
-      true,
-    );
-    expect(await pathExists(path.join(vault, 'pillars/seo/index.md'))).toBe(true);
+    expect(result.archived).toContain(orphanPath);
+    expect(
+      await pathExists(path.join(vault, siteArchiveDir(SITE), 'pillars/seo/gone.md')),
+    ).toBe(true);
+    expect(await pathExists(path.join(vault, pillarIndexPath(SITE, 'seo')))).toBe(true);
   });
 
   it('push dry-run validates and reports without calling upsert when invalid', async () => {
     const vault = await tempVault();
-    await mkdir(path.join(vault, 'pages'), { recursive: true });
+    const notePath = pageNotePath(SITE, 'contact');
+    await mkdir(path.dirname(path.join(vault, notePath)), { recursive: true });
     const page = serializeVaultNote(
       createDefaultFrontmatter({
         title: 'Contact',
@@ -140,11 +152,12 @@ describe('wpSyncEngine', () => {
       }),
       'Body\n',
     );
-    await writeFile(path.join(vault, 'pages/contact.md'), page);
+    await writeFile(path.join(vault, notePath), page);
 
     await expect(
       pushToWordPress({
         vaultRoot: vault,
+        siteId: SITE,
         client: mockClient(),
         dryRun: true,
       }),
@@ -153,9 +166,11 @@ describe('wpSyncEngine', () => {
 
   it('pushes a valid page with featured image', async () => {
     const vault = await tempVault();
-    await mkdir(path.join(vault, 'pages'), { recursive: true });
-    await mkdir(path.join(vault, 'assets/images/general'), { recursive: true });
-    await writeFile(path.join(vault, 'assets/images/general/hero.png'), Buffer.from('hero'));
+    const featured = `${siteAssetsImagesDir(SITE)}/general/hero.png`;
+    const notePath = pageNotePath(SITE, 'contact');
+    await mkdir(path.dirname(path.join(vault, notePath)), { recursive: true });
+    await mkdir(path.dirname(path.join(vault, featured)), { recursive: true });
+    await writeFile(path.join(vault, featured), Buffer.from('hero'));
 
     const page = serializeVaultNote(
       createDefaultFrontmatter({
@@ -166,11 +181,11 @@ describe('wpSyncEngine', () => {
         url_path: '/contact',
         wp_type: 'page',
         status: 'draft',
-        featured_image: 'assets/images/general/hero.png',
+        featured_image: featured,
       }),
       'Hello [[contact]]\n',
     );
-    await writeFile(path.join(vault, 'pages/contact.md'), page);
+    await writeFile(path.join(vault, notePath), page);
 
     let uploaded = false;
     const client = mockClient({
@@ -186,9 +201,14 @@ describe('wpSyncEngine', () => {
       },
     });
 
-    const result = await pushToWordPress({ vaultRoot: vault, client, dryRun: false });
+    const result = await pushToWordPress({
+      vaultRoot: vault,
+      siteId: SITE,
+      client,
+      dryRun: false,
+    });
     expect(uploaded).toBe(true);
-    expect(result.pushed).toContain('pages/contact.md');
-    expect(result.uploadedMedia).toContain('assets/images/general/hero.png');
+    expect(result.pushed).toContain(notePath);
+    expect(result.uploadedMedia).toContain(featured);
   });
 });

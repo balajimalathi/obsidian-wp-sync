@@ -8,13 +8,16 @@ import {
   type CrawlSnapshot,
   type SiteInventory,
 } from '../reconciler/siteReconciler.js';
+import { ensureSiteDirs, requireSite, upsertSite, type SiteRecord } from '../sites/registry.js';
 import type { WpRestClient } from '../wp/wpRestClient.js';
 import { joinVault } from '../vault/fs.js';
-import { CRAWL_SNAPSHOT_FILE } from '../vault/paths.js';
+import { siteCrawlSnapshotFile } from '../vault/paths.js';
 
 export interface BootstrapOptions {
   vaultRoot: string;
-  siteUrl: string;
+  siteId: string;
+  /** Override public crawl URL; defaults to registry publicSiteUrl. */
+  siteUrl?: string;
   client: WpRestClient;
   /** Absolute path to Python executable (default: crawler/.venv or python3). */
   pythonPath?: string;
@@ -23,10 +26,11 @@ export interface BootstrapOptions {
   maxPages?: number;
   /** Optional path to crawler package root; defaults to monorepo crawler/ */
   crawlerRoot?: string;
+  /** If site is missing from registry, register with these URLs. */
+  registerIfMissing?: Omit<SiteRecord, 'id'> & { id?: string };
 }
 
 function defaultCrawlerRoot(): string {
-  // packages/core/src/bootstrap -> repo root ../..
   const here = path.dirname(fileURLToPath(import.meta.url));
   return path.resolve(here, '../../../../crawler');
 }
@@ -72,6 +76,12 @@ export function runPythonCrawler(options: {
         env: {
           ...process.env,
           PYTHONPATH: [modulePath, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+          PLAYWRIGHT_BROWSERS_PATH:
+            process.env.PLAYWRIGHT_BROWSERS_PATH ||
+            path.join(
+              process.env.HOME || process.env.USERPROFILE || '',
+              'Library/Caches/ms-playwright',
+            ),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
@@ -93,11 +103,36 @@ export function runPythonCrawler(options: {
 }
 
 export async function runBootstrap(options: BootstrapOptions): Promise<SiteInventory> {
-  const outPath = joinVault(options.vaultRoot, CRAWL_SNAPSHOT_FILE);
+  const { vaultRoot, siteId } = options;
+  await ensureSiteDirs(vaultRoot, siteId);
+
+  let siteUrl = options.siteUrl;
+  try {
+    const site = await requireSite(vaultRoot, siteId);
+    siteUrl = siteUrl ?? site.publicSiteUrl;
+  } catch {
+    if (!options.registerIfMissing || !siteUrl) {
+      throw new Error(
+        `Unknown site "${siteId}". Add it in Obsidian Settings → WP Sync, or pass registerIfMissing / sites add.`,
+      );
+    }
+    await upsertSite(vaultRoot, {
+      id: siteId,
+      name: options.registerIfMissing.name,
+      publicSiteUrl: options.registerIfMissing.publicSiteUrl || siteUrl,
+      wpApiUrl: options.registerIfMissing.wpApiUrl,
+    });
+  }
+
+  if (!siteUrl) {
+    throw new Error(`Missing public site URL for site "${siteId}"`);
+  }
+
+  const outPath = joinVault(vaultRoot, siteCrawlSnapshotFile(siteId));
 
   if (!options.skipCrawl) {
     await runPythonCrawler({
-      siteUrl: options.siteUrl,
+      siteUrl,
       outPath,
       pythonPath: options.pythonPath,
       crawlerRoot: options.crawlerRoot,
@@ -105,11 +140,10 @@ export async function runBootstrap(options: BootstrapOptions): Promise<SiteInven
     });
   }
 
-  let snapshot = await loadCrawlSnapshot(options.vaultRoot);
+  let snapshot = await loadCrawlSnapshot(vaultRoot, siteId);
   if (!snapshot) {
-    // Minimal empty snapshot so reconcile can still materialize WP content
     snapshot = {
-      site_url: options.siteUrl,
+      site_url: siteUrl,
       crawled_at: new Date().toISOString(),
       page_count: 0,
       pages: [],
@@ -128,20 +162,18 @@ export async function runBootstrap(options: BootstrapOptions): Promise<SiteInven
       options.client.listCategories(),
     ]);
   } catch (err) {
-    wpWarning =
-      err instanceof Error
-        ? err.message
-        : 'WordPress REST API request failed';
+    wpWarning = err instanceof Error ? err.message : 'WordPress REST API request failed';
     console.warn(
       `[wp-sync] WordPress REST unavailable — classifying all crawled URLs as static.\n` +
         `  ${wpWarning}\n` +
-        `  Tip: set WP_API_URL to your actual WordPress origin if the public site is not WP (e.g. Vercel front + WP backend).`,
+        `  Tip: set WP_API_URL to your actual WordPress origin if the public site is not WP.`,
     );
   }
 
   const inventory = await reconcileSite({
-    vaultRoot: options.vaultRoot,
-    siteUrl: options.siteUrl,
+    vaultRoot,
+    siteId,
+    siteUrl,
     snapshot,
     posts,
     pages,

@@ -7,11 +7,15 @@ import { fileURLToPath } from 'node:url';
 import {
   createNodeFetchTransport,
   createWpRestClient,
+  listSites,
   loadCrawlSnapshot,
+  migrateFlatVaultToSite,
   pullFromWordPress,
   pushToWordPress,
   reconcileSite,
+  requireSite,
   runBootstrap,
+  upsertSite,
   validateVault,
   type CrawlSnapshot,
 } from '@obsidian-wp-sync/core';
@@ -19,7 +23,6 @@ import {
 function resolveEnvPath(): string {
   const candidates = [
     path.resolve(process.cwd(), '.env'),
-    // packages/cli/src → monorepo root (tsx) or packages/cli/dist → monorepo root (built)
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..', '.env'),
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..', '.env'),
   ];
@@ -37,24 +40,20 @@ function requireEnv(name: string): string {
   return v;
 }
 
-/** Public consumer site crawled for structure (e.g. https://jsontoimg.com). */
-function publicSiteUrlFromEnv(): string {
-  return (
-    process.env.PUBLIC_SITE_URL?.trim() ||
-    process.env.WP_SITE_URL?.trim() ||
-    requireEnv('PUBLIC_SITE_URL')
-  );
+function requireSiteFlag(site?: string): string {
+  const id = site?.trim();
+  if (!id) {
+    throw new Error(
+      'Site id required (no default). Use --site <id> or Obsidian Settings → WP Sync.',
+    );
+  }
+  return id;
 }
 
-/** WordPress multisite origin that serves REST (e.g. https://blog.skndan.com/jsontoimg). */
-function apiUrlFromEnv(): string {
-  return process.env.WP_API_URL?.trim() || requireEnv('WP_API_URL');
-}
-
-function clientFromEnv() {
+function clientFromEnv(apiUrl: string) {
   return createWpRestClient(
     {
-      siteUrl: apiUrlFromEnv(),
+      siteUrl: apiUrl,
       username: requireEnv('WP_USERNAME'),
       applicationPassword: requireEnv('WP_APPLICATION_PASSWORD'),
     },
@@ -67,46 +66,119 @@ function vaultPath(flag?: string): string {
 }
 
 const program = new Command();
-program.name('wp-sync').description('Obsidian ↔ WordPress sync (Phase 1)').version('0.1.0');
+program.name('wp-sync').description('Obsidian ↔ WordPress sync').version('0.2.0');
+
+const sitesCmd = program.command('sites').description('Manage multi-site registry');
+
+sitesCmd
+  .command('list')
+  .option('--vault <path>', 'Obsidian vault root')
+  .action(async (opts: { vault?: string }) => {
+    const sites = await listSites(vaultPath(opts.vault));
+    if (sites.length === 0) {
+      console.log('No sites registered. Add one in Obsidian Settings → WP Sync or: wp-sync sites add');
+      return;
+    }
+    for (const s of sites) {
+      console.log(`${s.id}\t${s.name}\t${s.publicSiteUrl}\t${s.wpApiUrl}`);
+    }
+  });
+
+sitesCmd
+  .command('add')
+  .requiredOption('--id <id>', 'Site folder id (e.g. jsontoimg)')
+  .requiredOption('--name <name>', 'Display name')
+  .requiredOption('--public-url <url>', 'Public consumer site URL')
+  .requiredOption('--wp-api-url <url>', 'WordPress REST API origin')
+  .option('--vault <path>', 'Obsidian vault root')
+  .action(
+    async (opts: {
+      id: string;
+      name: string;
+      publicUrl: string;
+      wpApiUrl: string;
+      vault?: string;
+    }) => {
+      await upsertSite(vaultPath(opts.vault), {
+        id: opts.id,
+        name: opts.name,
+        publicSiteUrl: opts.publicUrl,
+        wpApiUrl: opts.wpApiUrl,
+      });
+      console.log(`Registered site ${opts.id}`);
+    },
+  );
+
+sitesCmd
+  .command('migrate-flat')
+  .description('Move Phase-1 flat vault folders into sites/<id>/')
+  .requiredOption('--site <id>', 'Target site id')
+  .requiredOption('--name <name>', 'Display name')
+  .requiredOption('--public-url <url>', 'Public consumer site URL')
+  .requiredOption('--wp-api-url <url>', 'WordPress REST API origin')
+  .option('--vault <path>', 'Obsidian vault root')
+  .action(
+    async (opts: {
+      site: string;
+      name: string;
+      publicUrl: string;
+      wpApiUrl: string;
+      vault?: string;
+    }) => {
+      const result = await migrateFlatVaultToSite(vaultPath(opts.vault), {
+        id: opts.site,
+        name: opts.name,
+        publicSiteUrl: opts.publicUrl,
+        wpApiUrl: opts.wpApiUrl,
+      });
+      console.log(`Migrated ${result.moved.length} path(s) into sites/${opts.site}/`);
+      for (const line of result.moved) console.log(`  ${line}`);
+    },
+  );
 
 program
   .command('bootstrap')
+  .requiredOption('--site <id>', 'Site id (required, no default)')
   .option('--vault <path>', 'Obsidian vault root')
-  .option('--skip-crawl', 'Reuse existing .wp-sync/crawl-snapshot.json')
+  .option('--skip-crawl', 'Reuse existing crawl-snapshot.json')
   .option('--max-pages <n>', 'crawl4ai page cap', '500')
-  .action(async (opts: { vault?: string; skipCrawl?: boolean; maxPages?: string }) => {
+  .action(async (opts: { site: string; vault?: string; skipCrawl?: boolean; maxPages?: string }) => {
+    const siteId = requireSiteFlag(opts.site);
     const vault = vaultPath(opts.vault);
-    const publicSiteUrl = publicSiteUrlFromEnv();
-    const apiUrl = apiUrlFromEnv();
-    console.log(`Crawl site: ${publicSiteUrl}`);
-    console.log(`WP API:     ${apiUrl}`);
+    const site = await requireSite(vault, siteId);
+    console.log(`Site:       ${siteId}`);
+    console.log(`Crawl site: ${site.publicSiteUrl}`);
+    console.log(`WP API:     ${site.wpApiUrl}`);
     const inventory = await runBootstrap({
       vaultRoot: vault,
-      siteUrl: publicSiteUrl,
-      client: clientFromEnv(),
+      siteId,
+      siteUrl: site.publicSiteUrl,
+      client: clientFromEnv(site.wpApiUrl),
       skipCrawl: Boolean(opts.skipCrawl),
       maxPages: Number(opts.maxPages ?? 500),
     });
     console.log(
-      `Bootstrap done: ${inventory.wordpress.length} wordpress, ${inventory.static.length} static → ${vault}`,
+      `Bootstrap done: ${inventory.wordpress.length} wordpress, ${inventory.static.length} static → sites/${siteId}`,
     );
   });
 
 program
   .command('inventory')
+  .requiredOption('--site <id>', 'Site id (required, no default)')
   .option('--vault <path>', 'Obsidian vault root')
-  .action(async (opts: { vault?: string }) => {
+  .action(async (opts: { site: string; vault?: string }) => {
+    const siteId = requireSiteFlag(opts.site);
     const vault = vaultPath(opts.vault);
-    const publicSiteUrl = publicSiteUrlFromEnv();
+    const site = await requireSite(vault, siteId);
     const snapshot =
-      (await loadCrawlSnapshot(vault)) ??
+      (await loadCrawlSnapshot(vault, siteId)) ??
       ({
-        site_url: publicSiteUrl,
+        site_url: site.publicSiteUrl,
         crawled_at: new Date().toISOString(),
         page_count: 0,
         pages: [],
       } satisfies CrawlSnapshot);
-    const client = clientFromEnv();
+    const client = clientFromEnv(site.wpApiUrl);
     const [posts, pages, categories] = await Promise.all([
       client.listPosts(),
       client.listPages(),
@@ -114,7 +186,8 @@ program
     ]);
     const inventory = await reconcileSite({
       vaultRoot: vault,
-      siteUrl: publicSiteUrl,
+      siteId,
+      siteUrl: site.publicSiteUrl,
       snapshot,
       posts,
       pages,
@@ -127,10 +200,12 @@ program
 
 program
   .command('validate')
+  .requiredOption('--site <id>', 'Site id (required, no default)')
   .option('--vault <path>', 'Obsidian vault root')
   .option('--allow-draft-links', 'Allow publish→draft links')
-  .action(async (opts: { vault?: string; allowDraftLinks?: boolean }) => {
-    const issues = await validateVault(vaultPath(opts.vault), {
+  .action(async (opts: { site: string; vault?: string; allowDraftLinks?: boolean }) => {
+    const siteId = requireSiteFlag(opts.site);
+    const issues = await validateVault(vaultPath(opts.vault), siteId, {
       allowDraftLinks: Boolean(opts.allowDraftLinks),
     });
     if (issues.length === 0) {
@@ -145,12 +220,17 @@ program
 
 program
   .command('pull')
+  .requiredOption('--site <id>', 'Site id (required, no default)')
   .option('--vault <path>', 'Obsidian vault root')
   .option('--dry-run', 'Do not write vault files')
-  .action(async (opts: { vault?: string; dryRun?: boolean }) => {
+  .action(async (opts: { site: string; vault?: string; dryRun?: boolean }) => {
+    const siteId = requireSiteFlag(opts.site);
+    const vault = vaultPath(opts.vault);
+    const site = await requireSite(vault, siteId);
     const result = await pullFromWordPress({
-      vaultRoot: vaultPath(opts.vault),
-      client: clientFromEnv(),
+      vaultRoot: vault,
+      siteId,
+      client: clientFromEnv(site.wpApiUrl),
       dryRun: Boolean(opts.dryRun),
     });
     console.log(
@@ -160,13 +240,18 @@ program
 
 program
   .command('push')
+  .requiredOption('--site <id>', 'Site id (required, no default)')
   .option('--vault <path>', 'Obsidian vault root')
   .option('--dry-run', 'Validate and report without WP writes')
   .option('--allow-draft-links', 'Allow publish→draft links')
-  .action(async (opts: { vault?: string; dryRun?: boolean; allowDraftLinks?: boolean }) => {
+  .action(async (opts: { site: string; vault?: string; dryRun?: boolean; allowDraftLinks?: boolean }) => {
+    const siteId = requireSiteFlag(opts.site);
+    const vault = vaultPath(opts.vault);
+    const site = await requireSite(vault, siteId);
     const result = await pushToWordPress({
-      vaultRoot: vaultPath(opts.vault),
-      client: clientFromEnv(),
+      vaultRoot: vault,
+      siteId,
+      client: clientFromEnv(site.wpApiUrl),
       dryRun: Boolean(opts.dryRun),
       allowDraftLinks: Boolean(opts.allowDraftLinks),
     });

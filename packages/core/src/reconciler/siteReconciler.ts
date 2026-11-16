@@ -4,9 +4,9 @@ import {
   createDefaultFrontmatter,
   serializeVaultNote,
 } from '../schema/frontmatter.js';
+import { ensureSiteDirs } from '../sites/registry.js';
 import type { WpPage, WpPost, WpTerm } from '../wp/types.js';
 import {
-  ensureDir,
   joinVault,
   listFilesRecursive,
   moveFile,
@@ -15,15 +15,17 @@ import {
   writeText,
 } from '../vault/fs.js';
 import {
-  CRAWL_SNAPSHOT_FILE,
-  INVENTORY_MD_FILE,
-  PAGES_DIR,
-  PILLARS_DIR,
-  SITE_INVENTORY_JSON_FILE,
   STATIC_DIR,
   clusterNotePath,
+  isJunkCrawlPath,
   pageNotePath,
   pillarIndexPath,
+  siteCrawlSnapshotFile,
+  siteInventoryJsonFile,
+  siteInventoryMdFile,
+  sitePath,
+  siteRoot,
+  siteStaticDir,
   urlPathToStaticNotePath,
 } from '../vault/paths.js';
 
@@ -64,6 +66,7 @@ export interface SiteInventory {
 
 export interface ReconcileInput {
   vaultRoot: string;
+  siteId: string;
   siteUrl: string;
   snapshot: CrawlSnapshot;
   posts: WpPost[];
@@ -145,7 +148,6 @@ function titleOf(item: WpPost | WpPage): string {
 
 function contentOf(item: WpPost | WpPage): string {
   const raw = item.content.raw ?? item.content.rendered ?? '';
-  // Prefer raw Gutenberg/HTML converted to markdown
   return htmlToMarkdown(raw);
 }
 
@@ -155,51 +157,51 @@ function statusOf(item: WpPost | WpPage): 'draft' | 'publish' | 'private' {
   return 'draft';
 }
 
-async function migrateLegacyStaticRoutes(vaultRoot: string): Promise<void> {
-  // Move existing top-level route folders (e.g. jsontoimg/, extractdb/) into static/
-  const entries = await listFilesRecursive(vaultRoot, (rel) => {
-    const n = rel.replace(/\\/g, '/');
-    return n.endsWith('/index.md') && !n.includes('/');
-  });
-
-  // Also check one-level folders: jsontoimg/index.md
-  const topLevel = await listFilesRecursive(vaultRoot, (rel) => {
+async function migrateLegacyStaticRoutes(vaultRoot: string, siteId: string): Promise<void> {
+  const root = siteRoot(siteId);
+  const reserved = new Set([
+    'pillars',
+    'pages',
+    'static',
+    'assets',
+    '_archive',
+    '.wp-sync',
+    '.obsidian',
+  ]);
+  const siteAbs = joinVault(vaultRoot, root);
+  const topLevel = await listFilesRecursive(siteAbs, (rel) => {
     const n = rel.replace(/\\/g, '/');
     const parts = n.split('/');
-    return (
-      parts.length === 2 &&
-      parts[1] === 'index.md' &&
-      !['pillars', 'pages', 'static', 'assets', '_archive', '.wp-sync', '.obsidian'].includes(
-        parts[0]!,
-      )
-    );
+    return parts.length === 2 && parts[1] === 'index.md' && !reserved.has(parts[0]!);
   });
 
-  for (const rel of [...entries, ...topLevel]) {
+  for (const rel of topLevel) {
     const route = rel.split('/')[0]!;
-    const from = joinVault(vaultRoot, rel);
-    const toRel = `${STATIC_DIR}/${route}/index.md`;
+    const from = joinVault(vaultRoot, root, rel);
+    const toRel = sitePath(siteId, STATIC_DIR, route, 'index.md');
     const to = joinVault(vaultRoot, toRel);
-    if (await pathExists(from)) {
-      if (!(await pathExists(to))) {
-        await moveFile(from, to);
-      }
+    if ((await pathExists(from)) && !(await pathExists(to))) {
+      await moveFile(from, to);
     }
   }
 }
 
-export async function loadCrawlSnapshot(vaultRoot: string): Promise<CrawlSnapshot | null> {
-  const file = joinVault(vaultRoot, CRAWL_SNAPSHOT_FILE);
+export async function loadCrawlSnapshot(
+  vaultRoot: string,
+  siteId: string,
+): Promise<CrawlSnapshot | null> {
+  const file = joinVault(vaultRoot, siteCrawlSnapshotFile(siteId));
   if (!(await pathExists(file))) return null;
   return JSON.parse(await readText(file)) as CrawlSnapshot;
 }
 
 export async function saveCrawlSnapshot(
   vaultRoot: string,
+  siteId: string,
   snapshot: CrawlSnapshot,
 ): Promise<void> {
   await writeText(
-    joinVault(vaultRoot, CRAWL_SNAPSHOT_FILE),
+    joinVault(vaultRoot, siteCrawlSnapshotFile(siteId)),
     JSON.stringify(snapshot, null, 2) + '\n',
   );
 }
@@ -221,7 +223,13 @@ export function buildInventoryMarkdown(inventory: SiteInventory): string {
       `| ${item.role} | ${item.title} | \`${item.vault_path}\` | ${item.url_path} | ${item.wp_id ?? ''} |`,
     );
   }
-  lines.push('', '## Static content (manual deploy — never pushed to WordPress)', '', '| Title | Vault path | URL |', '| --- | --- | --- |');
+  lines.push(
+    '',
+    '## Static content (manual deploy — never pushed to WordPress)',
+    '',
+    '| Title | Vault path | URL |',
+    '| --- | --- | --- |',
+  );
   for (const item of inventory.static) {
     lines.push(`| ${item.title} | \`${item.vault_path}\` | ${item.url_path} |`);
   }
@@ -230,15 +238,9 @@ export function buildInventoryMarkdown(inventory: SiteInventory): string {
 }
 
 export async function reconcileSite(input: ReconcileInput): Promise<SiteInventory> {
-  const { vaultRoot, siteUrl, snapshot, posts, pages, categories } = input;
-  await ensureDir(joinVault(vaultRoot, PILLARS_DIR));
-  await ensureDir(joinVault(vaultRoot, PAGES_DIR));
-  await ensureDir(joinVault(vaultRoot, STATIC_DIR));
-  await ensureDir(joinVault(vaultRoot, 'assets/images'));
-  await ensureDir(joinVault(vaultRoot, 'assets/placeholders'));
-  await ensureDir(joinVault(vaultRoot, '.wp-sync'));
-
-  await migrateLegacyStaticRoutes(vaultRoot);
+  const { vaultRoot, siteId, siteUrl, snapshot, posts, pages, categories } = input;
+  await ensureSiteDirs(vaultRoot, siteId);
+  await migrateLegacyStaticRoutes(vaultRoot, siteId);
 
   const catById = categoryById(categories);
   const claimedPublicPaths = new Set<string>();
@@ -250,8 +252,6 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
     .map((p) => normalizeUrlPath(p.url, siteUrl));
   const crawlBySlug = buildCrawlPathIndex(crawlPaths);
 
-  // Pillars = first post per category used as index when only one "main" post;
-  // For bootstrap: each category folder gets posts; the first publish post becomes pillar index if named like category, else first post is pillar.
   const postsByCategory = new Map<string, WpPost[]>();
   for (const post of posts) {
     const catSlug = primaryCategorySlug(post, catById);
@@ -261,13 +261,11 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
   }
 
   for (const [catSlug, catPosts] of postsByCategory) {
-    // Prefer a post whose slug matches the category as pillar; else first by title.
     const sorted = [...catPosts].sort((a, b) => titleOf(a).localeCompare(titleOf(b)));
-    const pillarPost =
-      sorted.find((p) => p.slug === catSlug) ?? sorted[0]!;
+    const pillarPost = sorted.find((p) => p.slug === catSlug) ?? sorted[0]!;
     const clusterPosts = sorted.filter((p) => p.id !== pillarPost.id);
 
-    const pillarPath = pillarIndexPath(catSlug);
+    const pillarPath = pillarIndexPath(siteId, catSlug);
     const pillarUrl = resolvePublicPathForSlug(pillarPost.slug, 'post', crawlBySlug);
     claimedPublicPaths.add(pillarUrl);
 
@@ -302,7 +300,7 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
     });
 
     for (const post of clusterPosts) {
-      const notePath = clusterNotePath(catSlug, post.slug);
+      const notePath = clusterNotePath(siteId, catSlug, post.slug);
       const urlPath = resolvePublicPathForSlug(post.slug, 'post', crawlBySlug);
       claimedPublicPaths.add(urlPath);
       const fm = createDefaultFrontmatter({
@@ -337,7 +335,7 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
   for (const page of pages) {
     const urlPath = resolvePublicPathForSlug(page.slug, 'page', crawlBySlug);
     claimedPublicPaths.add(urlPath);
-    const notePath = pageNotePath(page.slug);
+    const notePath = pageNotePath(siteId, page.slug);
     const fm = createDefaultFrontmatter({
       title: titleOf(page),
       source: 'wordpress',
@@ -366,22 +364,13 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
     });
   }
 
-  // Crawl pages not matched to WP → static
   for (const page of snapshot.pages) {
     if (page.status !== 'ok') continue;
     const urlPath = normalizeUrlPath(page.url, siteUrl);
     if (claimedPublicPaths.has(urlPath)) continue;
-    // Skip obvious non-content paths
-    if (
-      urlPath.includes('/wp-json') ||
-      urlPath.includes('/wp-admin') ||
-      urlPath.includes('/feed') ||
-      urlPath.match(/\.(xml|json|css|js)$/i)
-    ) {
-      continue;
-    }
+    if (isJunkCrawlPath(urlPath, siteId)) continue;
 
-    const notePath = urlPathToStaticNotePath(urlPath);
+    const notePath = urlPathToStaticNotePath(siteId, urlPath);
     const slug = slugFromPath(urlPath);
     const title = page.title?.trim() || slug;
     const abs = joinVault(vaultRoot, notePath);
@@ -405,7 +394,6 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
       const body = page.markdown?.trim() ? page.markdown.trim() + '\n' : '';
       await writeText(abs, serializeVaultNote(fm, body));
     } else {
-      // Ensure existing static note has frontmatter; if legacy empty, wrap it
       const existing = await readText(abs);
       if (!existing.startsWith('---')) {
         const fm = createDefaultFrontmatter({
@@ -431,20 +419,21 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
     });
   }
 
-  // Also inventory any static notes already on disk
-  const staticFiles = await listFilesRecursive(joinVault(vaultRoot, STATIC_DIR), (rel) =>
+  const staticRoot = siteStaticDir(siteId);
+  const staticFiles = await listFilesRecursive(joinVault(vaultRoot, staticRoot), (rel) =>
     rel.endsWith('.md'),
   );
   const knownStatic = new Set(staticItems.map((s) => s.vault_path));
   for (const rel of staticFiles) {
-    const vaultPath = path.posix.join(STATIC_DIR, rel.replace(/\\/g, '/'));
+    const vaultPath = path.posix.join(staticRoot, rel.replace(/\\/g, '/'));
     if (knownStatic.has(vaultPath)) continue;
     staticItems.push({
       source: 'static',
       role: 'static',
       title: path.posix.basename(rel, '.md'),
       slug: path.posix.basename(rel, '.md'),
-      url_path: '/' + rel.replace(/\\/g, '/').replace(/\/index\.md$/, '').replace(/\.md$/, ''),
+      url_path:
+        '/' + rel.replace(/\\/g, '/').replace(/\/index\.md$/, '').replace(/\.md$/, ''),
       vault_path: vaultPath,
       wp_id: null,
       wp_type: null,
@@ -459,11 +448,14 @@ export async function reconcileSite(input: ReconcileInput): Promise<SiteInventor
   };
 
   await writeText(
-    joinVault(vaultRoot, SITE_INVENTORY_JSON_FILE),
+    joinVault(vaultRoot, siteInventoryJsonFile(siteId)),
     JSON.stringify(inventory, null, 2) + '\n',
   );
-  await writeText(joinVault(vaultRoot, INVENTORY_MD_FILE), buildInventoryMarkdown(inventory));
-  await saveCrawlSnapshot(vaultRoot, snapshot);
+  await writeText(
+    joinVault(vaultRoot, siteInventoryMdFile(siteId)),
+    buildInventoryMarkdown(inventory),
+  );
+  await saveCrawlSnapshot(vaultRoot, siteId, snapshot);
 
   return inventory;
 }

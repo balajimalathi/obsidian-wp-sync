@@ -9,11 +9,13 @@ import {
   parseVaultNote,
   type VaultNoteFrontmatter,
 } from '../schema/frontmatter.js';
-import { joinVault, listFilesRecursive, pathExists } from '../vault/fs.js';
+import { joinVault, listFilesRecursive, pathExists, readText } from '../vault/fs.js';
 import {
   ASSETS_IMAGES_DIR,
   isPlaceholderPath,
+  isUnderSite,
   pillarIndexPath,
+  siteRoot,
 } from '../vault/paths.js';
 
 export type ValidationSeverity = 'error' | 'warning';
@@ -37,20 +39,25 @@ export interface VaultNoteRecord {
   body: string;
 }
 
-async function loadVaultNotes(vaultRoot: string): Promise<VaultNoteRecord[]> {
+async function loadVaultNotes(
+  vaultRoot: string,
+  siteId: string,
+): Promise<VaultNoteRecord[]> {
+  const prefix = `${siteRoot(siteId)}/`;
   const mdFiles = await listFilesRecursive(vaultRoot, (rel) => {
     const n = rel.replace(/\\/g, '/');
     if (!n.endsWith('.md')) return false;
-    if (n.startsWith('.wp-sync/')) return false;
+    if (!isUnderSite(siteId, n)) return false;
+    if (n.includes('/.wp-sync/')) return false;
+    if (n.includes('/_archive/')) return false;
     if (n.startsWith('.obsidian/')) return false;
-    if (n.startsWith('_archive/')) return false;
-    return true;
+    return n.startsWith(prefix);
   });
 
   const notes: VaultNoteRecord[] = [];
   for (const rel of mdFiles) {
     const abs = joinVault(vaultRoot, rel);
-    const raw = await (await import('../vault/fs.js')).readText(abs);
+    const raw = await readText(abs);
     try {
       const parsed = parseVaultNote(raw);
       notes.push({ path: rel.replace(/\\/g, '/'), ...parsed });
@@ -69,24 +76,15 @@ function resolveLinkTarget(
 ): VaultNoteRecord | null {
   const cleaned = target.replace(/\.md$/i, '').replace(/\\/g, '/');
 
-  // Absolute-from-vault style
   const candidates = [
     cleaned,
     `${cleaned}.md`,
     cleaned.endsWith('/index') ? `${cleaned}.md` : `${cleaned}/index.md`,
   ];
 
-  // Relative to note directory
   const fromDir = path.posix.dirname(fromNotePath);
-  for (const c of [...candidates]) {
-    candidates.push(path.posix.normalize(`${fromDir}/${c}`));
-    if (!c.endsWith('.md')) {
-      candidates.push(path.posix.normalize(`${fromDir}/${c}.md`));
-    }
-  }
-
   for (const c of candidates) {
-    const hit = notesByPath.get(c.replace(/^\.\//, ''));
+    const hit = notesByPath.get(c) ?? notesByPath.get(path.posix.join(fromDir, c));
     if (hit) return hit;
   }
 
@@ -96,10 +94,11 @@ function resolveLinkTarget(
 
 export async function validateVault(
   vaultRoot: string,
+  siteId: string,
   options: ValidateOptions = {},
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
-  const notes = await loadVaultNotes(vaultRoot);
+  const notes = await loadVaultNotes(vaultRoot, siteId);
   const selected = options.notePaths
     ? notes.filter((n) => options.notePaths!.includes(n.path))
     : notes;
@@ -107,7 +106,7 @@ export async function validateVault(
   const notesByPath = new Map(notes.map((n) => [n.path, n]));
   const notesBySlug = new Map(notes.map((n) => [n.frontmatter.slug, n]));
 
-  const duplicates = await findDuplicateImageGroups(vaultRoot);
+  const duplicates = await findDuplicateImageGroups(vaultRoot, siteId);
   for (const group of duplicates) {
     issues.push({
       severity: 'error',
@@ -180,7 +179,7 @@ export async function validateVault(
           message: `Cluster note ${note.path} is missing pillar frontmatter`,
         });
       } else {
-        const pillarPath = pillarIndexPath(fm.pillar);
+        const pillarPath = pillarIndexPath(siteId, fm.pillar);
         if (!notesByPath.has(pillarPath)) {
           issues.push({
             severity: 'error',
@@ -198,8 +197,11 @@ export async function validateVault(
     ];
 
     for (const target of linkTargets) {
-      // Skip pure image asset links
-      if (target.startsWith(`${ASSETS_IMAGES_DIR}/`) || target.startsWith('assets/')) {
+      if (
+        target.includes(`/${ASSETS_IMAGES_DIR}/`) ||
+        target.startsWith(`${ASSETS_IMAGES_DIR}/`) ||
+        target.startsWith('assets/')
+      ) {
         continue;
       }
       const resolved = resolveLinkTarget(note.path, target, notesByPath, notesBySlug);

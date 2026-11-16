@@ -2,14 +2,15 @@
   "name": "obsidian-wp-sync",
   "private": true,
   "version": "0.1.0",
-  "description": "Obsidian ↔ WordPress content sync (Phase 1: core + CLI + crawl4ai)",
+  "description": "Obsidian ↔ WordPress multi-site content sync (core + CLI + Obsidian plugin + crawl4ai)",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @obsidian-wp-sync/core && npm run build -w @obsidian-wp-sync/cli",
+    "build": "npm run build -w @obsidian-wp-sync/core && npm run build -w @obsidian-wp-sync/cli && npm run build -w @obsidian-wp-sync/obsidian-plugin",
     "test": "npm run test -w @obsidian-wp-sync/core",
-    "wp-sync": "npm run start -w @obsidian-wp-sync/cli --"
+    "wp-sync": "npm run start -w @obsidian-wp-sync/cli --",
+    "plugin:install": "npm run build -w @obsidian-wp-sync/obsidian-plugin && npm run install-to-vault -w @obsidian-wp-sync/obsidian-plugin --"
   },
   "engines": {
     "node": ">=20"

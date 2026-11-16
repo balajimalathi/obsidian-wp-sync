@@ -9,3 +9,4 @@ export * from './sync/wpSyncEngine.js';
 export * from './vault/paths.js';
 export * from './vault/fs.js';
 export * from './bootstrap/runBootstrap.js';
+export * from './sites/registry.js';
