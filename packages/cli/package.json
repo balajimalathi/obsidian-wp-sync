@@ -1,0 +1,22 @@
+{
+  "name": "@obsidian-wp-sync/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "wp-sync": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --import tsx src/index.ts"
+  },
+  "dependencies": {
+    "@obsidian-wp-sync/core": "*",
+    "commander": "^13.1.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

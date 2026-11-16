@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.local
+*.log
+.DS_Store
+.wp-sync/crawl-snapshot.json
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+crawler/.venv/
+*.egg-info/
+.mypy_cache/

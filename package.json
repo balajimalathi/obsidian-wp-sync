@@ -1,0 +1,17 @@
+{
+  "name": "obsidian-wp-sync",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Obsidian ↔ WordPress content sync (Phase 1: core + CLI + crawl4ai)",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @obsidian-wp-sync/core && npm run build -w @obsidian-wp-sync/cli",
+    "test": "npm run test -w @obsidian-wp-sync/core",
+    "wp-sync": "npm run start -w @obsidian-wp-sync/cli --"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
