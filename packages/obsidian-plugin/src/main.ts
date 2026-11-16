@@ -1,5 +1,6 @@
 import { Menu, Notice, Plugin } from 'obsidian';
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import {
   listSites,
@@ -10,6 +11,7 @@ import {
 import { AddSiteModal } from './AddSiteModal.js';
 import { SiteSuggestModal } from './SiteSuggestModal.js';
 import { WpSyncSettingTab } from './SettingsTab.js';
+import { envWithNodePath, resolveNodePath } from './resolveNode.js';
 import {
   DEFAULT_SETTINGS,
   type WpSyncPluginSettings,
@@ -204,10 +206,28 @@ export default class WpSyncPlugin extends Plugin {
   ): Promise<string> {
     const packageRoot = this.settings.packageRoot;
     const vault = this.vaultRoot();
+    const nodePath = resolveNodePath(this.settings.nodePath);
+    const cliEntry = path.join(packageRoot, 'packages/cli/src/index.ts');
+    if (!existsSync(cliEntry)) {
+      throw new Error(`CLI not found at ${cliEntry}. Check Sync package root.`);
+    }
+
+    // Prefer local tsx so we don't depend on npm being on PATH.
+    const tsxCandidates = [
+      path.join(packageRoot, 'node_modules/tsx/dist/loader.mjs'),
+      path.join(packageRoot, 'packages/cli/node_modules/tsx/dist/loader.mjs'),
+    ];
+    const tsxLoader = tsxCandidates.find((p) => existsSync(p));
+    if (!tsxLoader) {
+      throw new Error(
+        `tsx not found under ${packageRoot}. Run npm install in the sync package root.`,
+      );
+    }
+
     const args = [
-      'run',
-      'wp-sync',
-      '--',
+      '--import',
+      tsxLoader,
+      cliEntry,
       command,
       '--site',
       site.id,
@@ -216,17 +236,15 @@ export default class WpSyncPlugin extends Plugin {
     ];
 
     return new Promise((resolve, reject) => {
-      const child = spawn('npm', args, {
+      const child = spawn(nodePath, args, {
         cwd: packageRoot,
-        env: {
-          ...process.env,
+        env: envWithNodePath(nodePath, {
           PUBLIC_SITE_URL: site.publicSiteUrl,
           WP_API_URL: site.wpApiUrl,
           WP_USERNAME: creds.username,
           WP_APPLICATION_PASSWORD: creds.applicationPassword,
           VAULT_PATH: vault,
-        },
-        shell: process.platform === 'win32',
+        }),
       });
       let stdout = '';
       let stderr = '';

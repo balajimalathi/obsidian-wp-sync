@@ -26,6 +26,21 @@ export class WpSyncSettingTab extends PluginSettingTab {
           }),
       );
 
+    new Setting(containerEl)
+      .setName('Node binary')
+      .setDesc(
+        'Absolute path to node (leave blank to auto-detect). Required when Obsidian cannot see nvm/Homebrew PATH.',
+      )
+      .addText((t) =>
+        t
+          .setPlaceholder('/Users/you/.nvm/versions/node/v24.x.x/bin/node')
+          .setValue(this.plugin.settings.nodePath)
+          .onChange(async (v) => {
+            this.plugin.settings.nodePath = v.trim();
+            await this.plugin.saveSettings();
+          }),
+      );
+
     let sites: SiteRecord[] = [];
     try {
       sites = await this.plugin.listVaultSites();

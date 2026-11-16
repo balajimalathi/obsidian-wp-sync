@@ -35,6 +35,8 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian4 = require("obsidian");
 var import_node_child_process = require("node:child_process");
+var import_node_fs2 = require("node:fs");
+var import_node_path3 = __toESM(require("node:path"));
 
 // ../../node_modules/zod/v3/external.js
 var external_exports = {};
@@ -514,8 +516,8 @@ function getErrorMap() {
 
 // ../../node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path2, errorMaps, issueData } = params;
-  const fullPath = [...path2, ...issueData.path || []];
+  const { data, path: path4, errorMaps, issueData } = params;
+  const fullPath = [...path4, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -631,11 +633,11 @@ var errorUtil;
 
 // ../../node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path2, key) {
+  constructor(parent, value, path4, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path2;
+    this._path = path4;
     this._key = key;
   }
   get path() {
@@ -4353,6 +4355,14 @@ var WpSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    new import_obsidian3.Setting(containerEl).setName("Node binary").setDesc(
+      "Absolute path to node (leave blank to auto-detect). Required when Obsidian cannot see nvm/Homebrew PATH."
+    ).addText(
+      (t) => t.setPlaceholder("/Users/you/.nvm/versions/node/v24.x.x/bin/node").setValue(this.plugin.settings.nodePath).onChange(async (v) => {
+        this.plugin.settings.nodePath = v.trim();
+        await this.plugin.saveSettings();
+      })
+    );
     let sites = [];
     try {
       sites = await this.plugin.listVaultSites();
@@ -4421,9 +4431,65 @@ Credentials: ${hasCreds ? "saved" : "missing"}`
   }
 };
 
+// src/resolveNode.ts
+var import_node_fs = require("node:fs");
+var import_node_path2 = __toESM(require("node:path"));
+function resolveNodePath(override) {
+  if (override?.trim() && (0, import_node_fs.existsSync)(override.trim())) {
+    return override.trim();
+  }
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const candidates = [];
+  if (process.execPath && import_node_path2.default.basename(process.execPath).toLowerCase().includes("node")) {
+    candidates.push(process.execPath);
+  }
+  const nvmVersions = import_node_path2.default.join(home, ".nvm", "versions", "node");
+  if ((0, import_node_fs.existsSync)(nvmVersions)) {
+    try {
+      const versions = (0, import_node_fs.readdirSync)(nvmVersions).filter((v) => v.startsWith("v")).sort((a, b) => b.localeCompare(a, void 0, { numeric: true }));
+      for (const v of versions) {
+        candidates.push(import_node_path2.default.join(nvmVersions, v, "bin", "node"));
+      }
+    } catch {
+    }
+  }
+  candidates.push(
+    import_node_path2.default.join(home, ".local", "share", "fnm", "aliases", "default", "bin", "node"),
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/usr/bin/node"
+  );
+  for (const dir of (process.env.PATH || "").split(import_node_path2.default.delimiter)) {
+    if (!dir) continue;
+    candidates.push(import_node_path2.default.join(dir, "node"));
+  }
+  for (const c of candidates) {
+    if (c && (0, import_node_fs.existsSync)(c)) return c;
+  }
+  throw new Error(
+    "Node.js not found (Obsidian PATH often omits nvm). Set \u201CNode binary\u201D in Settings \u2192 WP Sync."
+  );
+}
+function envWithNodePath(nodePath, extra) {
+  const binDir = import_node_path2.default.dirname(nodePath);
+  const pathKey = process.platform === "win32" ? "Path" : "PATH";
+  const current = process.env[pathKey] || process.env.PATH || "";
+  const parts = current.split(import_node_path2.default.delimiter).filter(Boolean);
+  if (!parts.includes(binDir)) parts.unshift(binDir);
+  for (const extraDir of ["/opt/homebrew/bin", "/usr/local/bin"]) {
+    if ((0, import_node_fs.existsSync)(extraDir) && !parts.includes(extraDir)) parts.push(extraDir);
+  }
+  return {
+    ...process.env,
+    ...extra,
+    [pathKey]: parts.join(import_node_path2.default.delimiter)
+  };
+}
+
 // src/settings.ts
 var DEFAULT_SETTINGS = {
   packageRoot: "",
+  nodePath: "",
   activeSiteId: null,
   credentials: {},
   lastStatus: ""
@@ -4592,10 +4658,25 @@ var WpSyncPlugin = class extends import_obsidian4.Plugin {
   spawnWpSync(command, site, creds) {
     const packageRoot = this.settings.packageRoot;
     const vault = this.vaultRoot();
+    const nodePath = resolveNodePath(this.settings.nodePath);
+    const cliEntry = import_node_path3.default.join(packageRoot, "packages/cli/src/index.ts");
+    if (!(0, import_node_fs2.existsSync)(cliEntry)) {
+      throw new Error(`CLI not found at ${cliEntry}. Check Sync package root.`);
+    }
+    const tsxCandidates = [
+      import_node_path3.default.join(packageRoot, "node_modules/tsx/dist/loader.mjs"),
+      import_node_path3.default.join(packageRoot, "packages/cli/node_modules/tsx/dist/loader.mjs")
+    ];
+    const tsxLoader = tsxCandidates.find((p) => (0, import_node_fs2.existsSync)(p));
+    if (!tsxLoader) {
+      throw new Error(
+        `tsx not found under ${packageRoot}. Run npm install in the sync package root.`
+      );
+    }
     const args = [
-      "run",
-      "wp-sync",
-      "--",
+      "--import",
+      tsxLoader,
+      cliEntry,
       command,
       "--site",
       site.id,
@@ -4603,17 +4684,15 @@ var WpSyncPlugin = class extends import_obsidian4.Plugin {
       vault
     ];
     return new Promise((resolve, reject) => {
-      const child = (0, import_node_child_process.spawn)("npm", args, {
+      const child = (0, import_node_child_process.spawn)(nodePath, args, {
         cwd: packageRoot,
-        env: {
-          ...process.env,
+        env: envWithNodePath(nodePath, {
           PUBLIC_SITE_URL: site.publicSiteUrl,
           WP_API_URL: site.wpApiUrl,
           WP_USERNAME: creds.username,
           WP_APPLICATION_PASSWORD: creds.applicationPassword,
           VAULT_PATH: vault
-        },
-        shell: process.platform === "win32"
+        })
       });
       let stdout = "";
       let stderr = "";
